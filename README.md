@@ -5,7 +5,7 @@
 To test and deploy the smart contract follow the steps below.
 
 1. Install [Node.js](https://nodejs.org/en/download/)
-2. Clone the repository: `git clone https://github.com/algoexpert-io/Decentralized-Voting.git`
+2. Clone the repository: `git clone https://github.com/DoctorDictator/Decentralized-Voting-web3.git`
 3. `cd Decentralized-Voting`
 4. `cd backend`
 5. `npm install`
