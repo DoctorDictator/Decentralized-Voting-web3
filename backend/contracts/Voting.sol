@@ -1,109 +1,177 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.9;
+pragma solidity ^0.8.20;
 
-contract Voting {
-    uint256 nextVoteId;
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+
+contract Voting is Ownable, ReentrancyGuard, Pausable {
+    constructor() Ownable(msg.sender) {}
+
+    uint256 private nextVoteId;
 
     struct Vote {
         string uri;
         address owner;
         uint256 endTime;
-        uint256[] votes;
+        uint256 quorum;
+        uint256[] voteCounts;
         mapping(address => bool) voted;
         uint256 options;
+        bool cancelled;
+        uint256 totalVotes;
     }
 
-    mapping(uint256 => Vote) votes;
+    mapping(uint256 => Vote) private votes;
     mapping(address => bool) public members;
+
+    error NotMember();
+    error AlreadyMember();
+    error AlreadyVoted();
+    error VoteExpired();
+    error VoteAlreadyCancelled();
+    error InvalidOption();
+    error VoteNotFound();
+    error InvalidEndTime();
+    error InvalidOptionsCount();
+    error NotVoteOwner();
 
     event MemberJoined(address indexed member, uint256 joinedAt);
     event VoteCreated(
         address indexed owner,
         uint256 indexed voteId,
         uint256 indexed createdAt,
-        uint256 endTime
+        uint256 endTime,
+        uint256 options,
+        uint256 quorum
     );
     event Voted(
         address indexed voter,
         uint256 indexed voteId,
         uint256 indexed option,
-        uint256 createdAt
+        uint256 createdAt,
+        uint256 totalVotes
+    );
+    event VoteCancelled(
+        address indexed owner,
+        uint256 indexed voteId,
+        uint256 cancelledAt
     );
 
-    modifier isMember() {
-        require(members[msg.sender], "you are not a member");
+    modifier onlyMember() {
+        if (!members[msg.sender]) revert NotMember();
         _;
     }
 
-    modifier canVote(uint256 voteId, uint256 option) {
-        require(voteId < nextVoteId, "vote does not exist");
-        require(option < votes[voteId].options, "invalid option");
-        require(!votes[voteId].voted[msg.sender], "you have already voted");
-        require(block.timestamp <= votes[voteId].endTime, "vote has ended");
+    modifier validVote(uint256 voteId) {
+        if (voteId >= nextVoteId) revert VoteNotFound();
         _;
     }
 
-    function join() external {
-        require(!members[msg.sender], "you are already a member");
+    modifier voteActive(uint256 voteId) {
+        Vote storage v = votes[voteId];
+        if (block.timestamp > v.endTime) revert VoteExpired();
+        if (v.cancelled) revert VoteAlreadyCancelled();
+        _;
+    }
+
+    function join() external whenNotPaused nonReentrant {
+        if (members[msg.sender]) revert AlreadyMember();
         members[msg.sender] = true;
         emit MemberJoined(msg.sender, block.timestamp);
     }
 
     function createVote(
-        string memory uri,
+        string calldata uri,
         uint256 endTime,
-        uint256 options
-    ) external isMember {
-        require(
-            options >= 2 && options <= 8,
-            "number of options must be between 2 and 8"
-        );
-        require(endTime > block.timestamp, "end time cannot be in past");
+        uint256 options,
+        uint256 quorum
+    ) external whenNotPaused onlyMember {
+        if (options < 2 || options > 8) revert InvalidOptionsCount();
+        if (endTime <= block.timestamp) revert InvalidEndTime();
+
         uint256 voteId = nextVoteId;
 
         votes[voteId].uri = uri;
         votes[voteId].owner = msg.sender;
         votes[voteId].endTime = endTime;
         votes[voteId].options = options;
-        votes[voteId].votes = new uint256[](options);
+        votes[voteId].quorum = quorum;
+        votes[voteId].voteCounts = new uint256[](options);
 
-        emit VoteCreated(msg.sender, voteId, block.timestamp, endTime);
+        emit VoteCreated(msg.sender, voteId, block.timestamp, endTime, options, quorum);
         nextVoteId++;
     }
 
     function vote(uint256 voteId, uint256 option)
         external
-        isMember
-        canVote(voteId, option)
+        whenNotPaused
+        onlyMember
+        validVote(voteId)
+        voteActive(voteId)
+        nonReentrant
     {
-        votes[voteId].votes[option] = votes[voteId].votes[option] + 1;
-        votes[voteId].voted[msg.sender] = true;
-        emit Voted(msg.sender, voteId, option, block.timestamp);
+        Vote storage v = votes[voteId];
+        if (option >= v.options) revert InvalidOption();
+        if (v.voted[msg.sender]) revert AlreadyVoted();
+
+        v.voteCounts[option]++;
+        v.voted[msg.sender] = true;
+        v.totalVotes++;
+
+        emit Voted(msg.sender, voteId, option, block.timestamp, v.totalVotes);
+    }
+
+    function cancelVote(uint256 voteId)
+        external
+        onlyMember
+        validVote(voteId)
+    {
+        Vote storage v = votes[voteId];
+        if (v.owner != msg.sender) revert NotVoteOwner();
+        if (block.timestamp > v.endTime) revert VoteExpired();
+        if (v.cancelled) revert VoteAlreadyCancelled();
+
+        v.cancelled = true;
+        emit VoteCancelled(msg.sender, voteId, block.timestamp);
     }
 
     function getVote(uint256 voteId)
-        public
+        external
         view
+        validVote(voteId)
         returns (
-            string memory,
-            address,
-            uint256[] memory,
-            uint256
+            string memory uri,
+            address owner,
+            uint256[] memory voteCounts,
+            uint256 endTime,
+            uint256 quorum,
+            bool cancelled,
+            uint256 totalVotes
         )
     {
-        return (
-            votes[voteId].uri,
-            votes[voteId].owner,
-            votes[voteId].votes,
-            votes[voteId].endTime
-        );
+        Vote storage v = votes[voteId];
+        return (v.uri, v.owner, v.voteCounts, v.endTime, v.quorum, v.cancelled, v.totalVotes);
     }
 
     function didVote(address member, uint256 voteId)
-        public
+        external
         view
+        validVote(voteId)
         returns (bool)
     {
         return votes[voteId].voted[member];
+    }
+
+    function getVoteCount() external view returns (uint256) {
+        return nextVoteId;
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
     }
 }
